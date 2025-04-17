@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "206645704742",
+    "project_id": "write-doc",
+    "storage_bucket": "write-doc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:206645704742:android:db994096d0b74d401b0ee7",
+        "android_client_info": {
+          "package_name": "com.example.thrust_info_into_doc"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "206645704742-b5arhodu7gpehd8c1tl3rfj8aj7mjp29.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.thrust_info_into_doc",
+            "certificate_hash": "1c7e93c3165d6fe2e46fbed20dca9208a7dd3758"
+          }
+        },
+        {
+          "client_id": "206645704742-l9l0fhgad01jsigtj8onkf41snj1kf9g.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.thrust_info_into_doc",
+            "certificate_hash": "a917994e17de51529c9b8390a80ecd37dd65c8d8"
+          }
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC2QX5NygvJ_GCNO6YAd6ErenKsOQWKKkc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
