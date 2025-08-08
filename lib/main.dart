@@ -189,6 +189,79 @@ class _DocsWriteExampleState extends State<HomeScreen>
       }
     }
 
+  /// 指定された名前のフォルダを検索し、存在しない場合は新規作成するメソッドです
+  Future<String> _getOrCreateFolder(drive.DriveApi driveApi, String folderName) async {
+    debugPrint('フォルダを検索中: $folderName');
+    
+    try {
+      // 既存のフォルダを検索
+      final searchQuery = "mimeType='application/vnd.google-apps.folder' and name='$folderName' and trashed=false";
+      final searchResult = await driveApi.files.list(
+        q: searchQuery,
+        spaces: 'drive',
+      );
+
+      // フォルダが見つかった場合はそのIDを返す
+      if (searchResult.files != null && searchResult.files!.isNotEmpty) {
+        final existingFolder = searchResult.files!.first;
+        debugPrint('既存フォルダを発見: ${existingFolder.name} (ID: ${existingFolder.id})');
+        return existingFolder.id!;
+      }
+
+      // フォルダが見つからない場合は新規作成
+      debugPrint('フォルダが見つからないため、新規作成します: $folderName');
+      
+      final newFolder = drive.File()
+        ..name = folderName
+        ..mimeType = 'application/vnd.google-apps.folder';
+
+      final createdFolder = await driveApi.files.create(newFolder);
+      debugPrint('新規フォルダを作成しました: ${createdFolder.name} (ID: ${createdFolder.id})');
+      
+      return createdFolder.id!;
+      
+    } catch (e) {
+      debugPrint('フォルダの検索/作成でエラーが発生: $e');
+      throw Exception('フォルダの処理に失敗しました: $e');
+    }
+  }
+
+  /// 画像ファイルをGoogle Driveの指定フォルダにアップロードし、公開URLを返すメソッドです
+  Future<String> _uploadImageToDriveAndGetUrl(File image, http.Client client) async {
+    // Drive APIのインスタンスを作成
+    final driveApi = drive.DriveApi(client);
+
+    // ドキュメント名と同じフォルダを検索またはフォルダを作成
+    String folderId = await _getOrCreateFolder(driveApi, _selectedDocumentName!);
+    
+    debugPrint('アップロード先フォルダID: $folderId');
+
+    // アップロードするファイルのメタデータを作成
+    var media = drive.Media(image.openRead(), await image.length());
+    var driveFile = drive.File()
+      ..name = 'ocr_image_${DateTime.now().millisecondsSinceEpoch}.jpg'
+      ..mimeType = 'image/jpeg'
+      ..parents = [folderId]; // 指定したフォルダに保存
+
+    // ファイルをDriveにアップロード
+    final uploadedFile = await driveApi.files.create(
+      driveFile,
+      uploadMedia: media,
+    );
+
+    // ファイルを「全員に公開」に設定
+    await driveApi.permissions.create(
+      drive.Permission()
+        ..type = 'anyone'
+        ..role = 'reader',
+      uploadedFile.id!,
+    );
+
+    debugPrint('画像アップロード完了: ${uploadedFile.name}');
+
+    // 画像の公開URLを生成して返す
+    return "https://drive.google.com/uc?id=${uploadedFile.id}";
+  }
   Future<void> _btnCbHandleSignIn() async
   {
     try
@@ -223,6 +296,15 @@ class _DocsWriteExampleState extends State<HomeScreen>
       return;
     }
 
+    if (_image == null)
+    {
+      setState(()
+      {
+        _status = '画像を撮影してください。';
+      });
+      return; 
+    }
+
     if (_ocrResult == null || _ocrResult!.isEmpty)
     {
       setState(()
@@ -241,70 +323,138 @@ class _DocsWriteExampleState extends State<HomeScreen>
       return;
     }
 
-    final authHeaders = await _currentUser!.authHeaders;
-    final client = GoogleAuthClient(authHeaders);
-
-    final docsApi = docs.DocsApi(client);
-
-    _ocrResult = "${_ocrResult!}\n\n*************************************************************************************************************\n\n";
-
-    final req = docs.BatchUpdateDocumentRequest
-    (
-      requests:
-      [
-        docs.Request
-        (
-          insertText: docs.InsertTextRequest
-          (
-            text: _ocrResult!, // 保存したOCR結果を挿入
-            location: docs.Location(index: 1), // 先頭に挿入
-          ),
-        ),
-      ],
-    );
-
-    await docsApi.documents.batchUpdate(req, _selectedDocumentId!);
-
-    setState(()
+    try
     {
-      _status += '\nDocsへの書き込みに成功しました。';
-      _ocrResult = null; // 書き込み後はOCR結果をクリア
-    });
+      final authHeaders = await _currentUser!.authHeaders;
+      final client = GoogleAuthClient(authHeaders);
+      final docsApi = docs.DocsApi(client);
+
+      // ドキュメントの現在の情報を取得して末尾の位置を調べる
+      setState(() {
+        _status = 'ドキュメント情報を取得中...';
+      });
+
+      // ドキュメントの現在の情報を取得して末尾の位置を調べる
+      final document = await docsApi.documents.get(_selectedDocumentId!);
+      final endIndex = document.body!.content!.last.endIndex! - 1; // 末尾のインデックスを取得
+
+      debugPrint('ドキュメントの末尾インデックス: $endIndex');
+
+      setState(() {
+        _status = '画像をDriveにアップロード中...';
+      });
+
+      // テキストに区切り線を追加
+      final textToInsert = "${_ocrResult!}\n\n*************************************************************************************************************\n\n";
+
+      // ドキュメントに挿入
+      setState(() {
+        _status = 'ドキュメントに挿入中...';
+      });
+
+      // リクエストを作成（末尾に挿入）
+      final req = docs.BatchUpdateDocumentRequest(
+        requests: [
+          // 1. 画像を末尾に挿入するリクエスト
+          docs.Request(
+            insertInlineImage: docs.InsertInlineImageRequest(
+              uri: await _uploadImageToDriveAndGetUrl(_image!, client),
+              location: docs.Location(index: endIndex), // ドキュメントの末尾に挿入
+            ),
+          ),
+          // 2. テキストを末尾に挿入するリクエスト
+          docs.Request(
+            insertText: docs.InsertTextRequest(
+              text: textToInsert,
+              location: docs.Location(index: endIndex + 1), // 画像の後ろに挿入
+            ),
+          ),
+        ],
+      );
+
+      await docsApi.documents.batchUpdate(req, _selectedDocumentId!);
+
+      setState(() {
+        _status = 'Google Docsへの書き込みが完了しました✨';
+        _ocrResult = null; // 書き込み後はOCR結果をクリア
+        _image = null; // 画像もクリア
+      });
+    }
+    catch (e)
+    {
+      debugPrint('Docs書き込みエラー: $e');
+      setState(() {
+        _status = 'Docs書き込みエラー: $e';
+      });
+    }
   }
 
   Future<void> _btnCbCaptImage() async
   {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.camera); // ギャラリーにしたい場合は `.gallery`
+    debugPrint('=== カメラボタンが押されました ==='); // デバッグログ追加
+    
+    try {
+      setState(() {
+        _status = 'カメラを起動中...';
+      });
+      
+      debugPrint('ImagePickerを初期化中...'); // デバッグログ
+      final picker = ImagePicker();
+      
+      debugPrint('カメラを起動中...'); // デバッグログ
+      final pickedFile = await picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 80, // 画質を下げてメモリ使用量を削減
+        maxWidth: 1024,   // 最大幅を制限
+        maxHeight: 1024,  // 最大高さを制限
+      );
 
-    if (pickedFile == null)
-    {
+      debugPrint('カメラから戻りました'); // デバッグログ
+
+      if (pickedFile == null)
+      {
+        debugPrint('画像が選択されませんでした'); // デバッグログ
+        setState(()
+        {
+          _status = '画像が選択されていません。';
+          _image = null;
+        });
+        return;
+      }
+
+      debugPrint('画像ファイルパス: ${pickedFile.path}'); // デバッグログ
+      
+      setState(() {
+        _image = File(pickedFile.path);
+        _status = '画像を取得しました。OCR処理中...';
+      });
+
+      debugPrint('OCR処理開始...'); // デバッグログ
+      String? extractedText = await _processImage(_image!);
+      debugPrint('OCR処理完了'); // デバッグログ
+
+      if(extractedText == null || extractedText.isEmpty)
+      {
+        debugPrint('OCR結果が空でした'); // デバッグログ
+        setState(()
+        {
+          _status = 'OCRに失敗しました。';
+        });
+        return;
+      }
+
       setState(()
       {
-        _status = '画像が選択されていません。';
-        _image = null; // 画像をクリア
+        _ocrResult = extractedText;
+        _status = 'OCR完了: ${extractedText.length}文字を認識しました';
       });
-      return;
-    }
-
-    _image = File(pickedFile.path);
-
-    String? extractedText = await _processImage(_image!);
-
-    if(extractedText == null || extractedText.isEmpty)
-    {
-      setState(()
-      {
-        _status = 'OCRに失敗しました。';
+      
+    } catch (e) {
+      debugPrint('エラーが発生しました: $e'); // デバッグログ
+      setState(() {
+        _status = 'エラーが発生しました: $e';
       });
-      return;
     }
-
-    setState(()
-    {
-      _ocrResult = extractedText; // OCR結果を保存
-      _status = 'OCR OK';
-    });
   }
 
   Future<String?> _processImage(File imageFile) async
@@ -317,186 +467,199 @@ class _DocsWriteExampleState extends State<HomeScreen>
     return recognizedText.text;
   }
 
-@override
-  Widget build(BuildContext context)
-  {
-    return Scaffold
-    (
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
       appBar: AppBar(title: Text("ポイしちゃお☆彡")),
-      body: SingleChildScrollView // 縦スクロールを有効にする
-      (
-        child: ConstrainedBox
-        (
-          constraints: BoxConstraints(
-            minHeight: MediaQuery.of(context).size.height*2, // 画面の高さに合わせる
-          ),
-          child: IntrinsicHeight // 子ウィジェットの高さに合わせる
-          (
-            child: Stack
-            (
-              children: 
-              [
-                Positioned
-                (
-                  top: imgBtnOffsetY + imgBtnHeight + 16, // 上からの距離
-                  right: 16, // 右からの距離
-                  child: Column
-                  (
-                    crossAxisAlignment: CrossAxisAlignment.end, // 子ウィジェットを右寄せ
-                    children:
-                    [
-                      SizedBox
-                      (
-                        width: textBtnWidth, // ボタンの幅
-                        height: textBtnHeight, // ボタンの高さ
-                        child: ElevatedButton
-                        (
-                          onPressed: _btnCbCaptImage,
-                          child: Text('カメラから読み取る'),
-                        ),
-                      ),
-                      SizedBox(height: 16), // ボタンと画像表示エリアの間の余白
-                      Container
-                      (
-                        width: MediaQuery.of(context).size.width - 32, // 画面幅から左右の余白を引いたサイズ
-                        height: 200, // 画像表示エリアの高さ
-                        decoration: BoxDecoration
-                        (
-                          color: Colors.grey[200], // 背景色
-                          border: Border.all(color: Colors.grey), // 枠線
-                          borderRadius: BorderRadius.circular(4), // 角を丸くする
-                        ),
-                        child: _image != null
-                            ? Image.file
-                            (
-                                _image!, // 選択された画像を表示
-                                fit: BoxFit.contain, // 画像をエリアにフィットさせる
-                            )
-                            : Center
-                            (
-                                child: Text
-                                (
-                                  '画像がここに表示されます', // プレースホルダーのテキスト
-                                  style: TextStyle(color: Colors.grey, fontSize: 16), // テキストのスタイル
-                                ),
-                            ),
-                      ),
-                      SizedBox(height: 16), // 画像表示エリアとテキストボックスの間の余白
-                      Container
-                      (
-                        width: MediaQuery.of(context).size.width - 32, // テキストボックスの幅を画面に合わせる
-                        height: 400, // テキストボックスの高さを固定
-                        padding: EdgeInsets.all(8), // 内側の余白
-                        decoration: BoxDecoration
-                        (
-                          color: Colors.white, // 背景色
-                          border: Border.all(color: Colors.grey), // 枠線
-                          borderRadius: BorderRadius.circular(4), // 角を丸くする
-                        ),
-                        child: SingleChildScrollView
-                        (
-                          child: Text
-                          (
-                            _ocrResult ?? '読み取ったテキストがここに表示されます', // OCR結果を表示
-                            style: TextStyle(fontSize: 14), // テキストのスタイル
-                          ),
-                        ),
-                      ),
-                      SizedBox(height: 16), // テキストボックスと次のボタンの間の余白
-                      SizedBox
-                      (
-                        width: textBtnWidth, // ボタンの幅
-                        height: textBtnHeight, // ボタンの高さ
-                        child: ElevatedButton
-                        (
-                          onPressed: _btnCbPushToDoc,
-                          child: Text('Google Docsへ書き込み'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Positioned
-                (
-                  top: imgBtnOffsetY, // 上からの距離
-                  left: imgBtnOffsetX, // 左からの距離
-                  right: imgBtnOffsetX, // 右からの距離
-                  child: Row( children:
-                  [
-                    // ドキュメント名を表示するテキストボックス
-                    Expanded
-                    (
-                      child: Container
-                      (
-                        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4), // 内側の余白
-                        decoration: BoxDecoration
-                        (
-                          color: Colors.white, // 背景色
-                          border: Border.all(color: Colors.grey), // 枠線
-                          borderRadius: BorderRadius.circular(4), // 角を丸くする
-                        ),
-                        child: Text
-                        (
-                          _selectedDocumentName != null ? '$_selectedDocumentName' : '未選択', // 表示するテキスト
-                          style: TextStyle(fontSize: 24), // テキストのスタイル
-                          overflow: TextOverflow.ellipsis, // テキストが長い場合は省略
-                        ),
-                      ),
-                    ),
-                    SizedBox
-                    (
-                      width: imgBtnWidth, // ボタンの幅
-                      height: imgBtnHeight, // ボタンの高さ
-                      child: ElevatedButton
-                      (
-                        onPressed: _btnCbSelectDoc,
-                        style: ElevatedButton.styleFrom
-                        (
-                          padding: EdgeInsets.zero, // 余白をゼロに設定
-                          shape: RoundedRectangleBorder
-                          (
-                            borderRadius: BorderRadius.zero, // 角をとがらせる
-                          ),
-                        ),
-                        child: Image.asset
-                        (
-                          'assets/icon/doc.png', // 画像のパスを指定
-                          fit: BoxFit.cover, // 画像をボタン全体にフィット
-                        ),
-                      ),
-                    ),            
-                    SizedBox
-                    (
-                      width: imgBtnWidth, // ボタンの幅
-                      height: imgBtnHeight, // ボタンの高さ
-                      child: ElevatedButton
-                      (
-                        onPressed: _btnCbHandleSignIn, // サインインボタン
-                        style: ElevatedButton.styleFrom
-                        (
-                          padding: EdgeInsets.zero, // 余白をゼロに設定
-                          shape: RoundedRectangleBorder
-                          (
-                            borderRadius: BorderRadius.zero, // 角をとがらせる
-                          ),
-                        ),
-                        child: Image.asset
-                        (
-                          'assets/icon/anonymous.png', // 画像のパスを指定
-                          fit: BoxFit.cover, // 画像をボタン全体にフィット
-                        ),
-                      ),
-                    ),
-                  ]),
-                ),
-              ],
-            ),
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildDebugInfo(),
+              SizedBox(height: 16),
+              _buildHeaderRow(),
+              SizedBox(height: 16),
+              _buildCaptureButton(),
+              SizedBox(height: 16),
+              _buildImageContainer(),
+              SizedBox(height: 16),
+              _buildTextContainer(),
+              SizedBox(height: 16),
+              _buildPushToDocButton(),
+            ],
           ),
         ),
       ),
     );
   }
+
+// デバッグ情報表示用ウィジェットを追加
+Widget _buildDebugInfo() {
+  return Container(
+    margin: EdgeInsets.all(8),
+    padding: EdgeInsets.all(8),
+    decoration: BoxDecoration(
+      color: Colors.yellow[100],
+      border: Border.all(color: Colors.orange),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('🐛 デバッグ情報'),
+        Text('ステータス: $_status'),
+        Text('画像: ${_image != null ? "選択済み" : "未選択"}'),
+        Text('OCR結果: ${_ocrResult != null ? "${_ocrResult!.length}文字" : "なし"}'),
+      ],
+    ),
+  );
 }
+  // ヘッダー部分（ドキュメント選択とサインイン）
+  Widget _buildHeaderRow() {
+    return Row(
+      children: [
+        Expanded(
+          child: Container(
+            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border.all(color: Colors.grey),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              _selectedDocumentName ?? '未選択',
+              style: TextStyle(fontSize: 24),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ),
+        SizedBox(width: 8),
+        _buildDocSelectButton(),
+        SizedBox(width: 8),
+        _buildSignInButton(),
+      ],
+    );
+  }
+
+  // ドキュメント選択ボタン
+  Widget _buildDocSelectButton() {
+    return SizedBox(
+      width: imgBtnWidth,
+      height: imgBtnHeight,
+      child: ElevatedButton(
+        onPressed: _btnCbSelectDoc,
+        style: ElevatedButton.styleFrom(
+          padding: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.zero,
+          ),
+        ),
+        child: Image.asset(
+          'assets/icon/doc.png',
+          fit: BoxFit.cover,
+        ),
+      ),
+    );
+  }
+
+  // サインインボタン
+  Widget _buildSignInButton() {
+    return SizedBox(
+      width: imgBtnWidth,
+      height: imgBtnHeight,
+      child: ElevatedButton(
+        onPressed: _btnCbHandleSignIn,
+        style: ElevatedButton.styleFrom(
+          padding: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.zero,
+          ),
+        ),
+        child: Image.asset(
+          'assets/icon/anonymous.png',
+          fit: BoxFit.cover,
+        ),
+      ),
+    );
+  }
+
+  // カメラから読み取るボタン
+  Widget _buildCaptureButton() {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: SizedBox(
+        width: textBtnWidth,
+        height: textBtnHeight,
+        child: ElevatedButton(
+          onPressed: _btnCbCaptImage,
+          child: Text('カメラから読み取る'),
+        ),
+      ),
+    );
+  }
+
+  // 画像表示エリア
+  Widget _buildImageContainer() {
+    return Container(
+      width: MediaQuery.of(context).size.width - 32,
+      height: 200,
+      decoration: BoxDecoration(
+        color: Colors.grey[200],
+        border: Border.all(color: Colors.grey),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: _image != null
+          ? Image.file(
+              _image!,
+              fit: BoxFit.contain,
+            )
+          : Center(
+              child: Text(
+                '画像がここに表示されます',
+                style: TextStyle(color: Colors.grey, fontSize: 16),
+              ),
+            ),
+    );
+  }
+
+  // テキスト表示エリア
+  Widget _buildTextContainer() {
+    return Container(
+      width: MediaQuery.of(context).size.width - 32,
+      height: 400,
+      padding: EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: Colors.grey),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: SingleChildScrollView(
+        child: Text(
+          _ocrResult ?? '読み取ったテキストがここに表示されます',
+          style: TextStyle(fontSize: 14),
+        ),
+      ),
+    );
+  }
+
+  // Google Docsへ書き込みボタン
+  Widget _buildPushToDocButton() {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: SizedBox(
+        width: textBtnWidth,
+        height: textBtnHeight,
+        child: ElevatedButton(
+          onPressed: _btnCbPushToDoc,
+          child: Text('Google Docsへ書き込み'),
+        ),
+      ),
+    );
+  }
+}
+
 // GoogleAuthClient ヘルパー
 class GoogleAuthClient extends http.BaseClient
 {
